@@ -272,9 +272,9 @@ pub mod starboard {
             }
         };
 
-        feed.committing_round = Some(round_key);
-        round.current_stage = 3;
-        round.committing_start_timestamp = timestamp;
+        feed.certifying_round = Some(round_key);
+        round.current_stage = 4;
+        round.certifying_start_timestamp = timestamp;
         Ok(())
     }
 
