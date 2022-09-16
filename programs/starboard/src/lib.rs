@@ -46,7 +46,7 @@ pub mod starboard {
         feed.update_interval = update_interval;
         feed.staking_round = None;
         feed.reporting_round = None;
-        feed.comitting_round = None;
+        feed.committing_round = None;
         feed.certifying_round = None;
         feed.finalizing_round = None;
         feed.bump = *ctx.bumps.get("feed").unwrap();
@@ -68,7 +68,7 @@ pub mod starboard {
         round.staking_start_timestamp = 0;
         round.num_stakers = 0;
         round.reporting_start_timestamp = 0;
-        round.comitting_start_timestamp = 0;
+        round.committing_start_timestamp = 0;
         round.certifying_start_timestamp = 0;
         round.finalizing_start_timestamp = 0;
         round.bump = *ctx.bumps.get("round").unwrap();
@@ -83,7 +83,7 @@ pub mod starboard {
                 feed.reporting_round = Some(round_key);
             },
             2 => {
-                feed.comitting_round = Some(round_key);
+                feed.committing_round = Some(round_key);
             },
             3 => {
                 feed.certifying_round = Some(round_key);
@@ -103,7 +103,7 @@ pub mod starboard {
         require!(
             feed.staking_round.is_some() ||
             feed.reporting_round.is_some() ||
-            feed.comitting_round.is_some() ||
+            feed.committing_round.is_some() ||
             feed.certifying_round.is_some() ||
             feed.finalizing_round.is_some(),
             StarboardError::NoRoundsError
@@ -216,7 +216,7 @@ pub mod starboard {
         Ok(())
     }
 
-    pub fn start_comitting(ctx: Context<StartComitting>) -> Result<()> {
+    pub fn start_committing(ctx: Context<StartComitting>) -> Result<()> {
         let clock = Clock::get()?;
         let timestamp = clock.slot;
         let round_key = ctx.accounts.round.key().clone();
@@ -228,23 +228,23 @@ pub mod starboard {
             round.current_stage == 2,
             StarboardError::RoundNotReady
         );
-        if feed.comitting_round != Some(round_key) {
-            if let Some(_comitting_round) = feed.comitting_round {
+        if feed.committing_round != Some(round_key) {
+            if let Some(_committing_round) = feed.committing_round {
                 let old_round = AccountLoader::<Round>::try_from(&ctx.remaining_accounts[0])?;
                 let old_round_data = old_round.load()?;
-                let feed_not_comitting = (old_round_data.comitting_start_timestamp.checked_add(feed.update_interval.into()).unwrap()) < timestamp;
-                require!(feed_not_comitting, StarboardError::ComittingInProgress);
+                let feed_not_committing = (old_round_data.committing_start_timestamp.checked_add(feed.update_interval.into()).unwrap()) < timestamp;
+                require!(feed_not_committing, StarboardError::ComittingInProgress);
             }
         };
 
-        feed.comitting_round = Some(round_key);
+        feed.committing_round = Some(round_key);
         round.current_stage = 3;
-        round.comitting_start_timestamp = timestamp;
+        round.committing_start_timestamp = timestamp;
         Ok(())
 
     }
 
-    pub fn comitt(
+    pub fn committ(
         ctx: Context<Comitt>,
         commitment: [u8; 32],
     ) -> Result<()> {
@@ -258,7 +258,7 @@ pub mod starboard {
         let mut feed = ctx.accounts.feed.load_mut()?;
         let mut round = ctx.accounts.round.load_mut()?;
 
-        // 3 = comitting
+        // 3 = committing
         require!(
             round.current_stage == 3,
             StarboardError::RoundNotReady
@@ -272,13 +272,44 @@ pub mod starboard {
             }
         };
 
-        feed.comitting_round = Some(round_key);
+        feed.committing_round = Some(round_key);
         round.current_stage = 3;
-        round.comitting_start_timestamp = timestamp;
+        round.committing_start_timestamp = timestamp;
         Ok(())
     }
 
     pub fn certify(ctx: Context<Certify>) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn start_finalizing(ctx: Context<StartFinalizing>) -> Result<()> {
+        let clock = Clock::get()?;
+        let timestamp = clock.slot;
+        let round_key = ctx.accounts.round.key().clone();
+        let mut feed = ctx.accounts.feed.load_mut()?;
+        let mut round = ctx.accounts.round.load_mut()?;
+
+        // 4 = certifying
+        require!(
+            round.current_stage == 4,
+            StarboardError::RoundNotReady
+        );
+        if feed.finalizing_round != Some(round_key) {
+            if let Some(_finalizing_round) = feed.finalizing_round {
+                let old_round = AccountLoader::<Round>::try_from(&ctx.remaining_accounts[0])?;
+                let old_round_data = old_round.load()?;
+                let feed_not_finalizing = (old_round_data.finalizing_start_timestamp.checked_add(feed.update_interval.into()).unwrap()) < timestamp;
+                require!(feed_not_finalizing, StarboardError::FinalizingInProgress);
+            }
+        };
+
+        feed.finalizing_round = Some(round_key);
+        round.current_stage = 4;
+        round.finalizing_start_timestamp = timestamp;
+        Ok(())
+    }
+
+    pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
         Ok(())
     }
 
@@ -306,7 +337,7 @@ pub struct Round {
     pub staking_start_timestamp: u64,
     pub num_stakers: u32,
     pub reporting_start_timestamp: u64,
-    pub comitting_start_timestamp: u64,
+    pub committing_start_timestamp: u64,
     pub certifying_start_timestamp: u64,
     pub finalizing_start_timestamp: u64,
     pub bump: u8,
@@ -330,7 +361,7 @@ pub struct Feed {
     // Pubkeys of the Round PDAs for each of the five pipelined-stages
     pub staking_round: Option<Pubkey>,
     pub reporting_round: Option<Pubkey>,
-    pub comitting_round: Option<Pubkey>,
+    pub committing_round: Option<Pubkey>,
     pub certifying_round: Option<Pubkey>,
     pub finalizing_round: Option<Pubkey>,
     pub bump: u8,
@@ -396,6 +427,8 @@ pub enum StarboardError {
     ComittingInProgress,
     #[msg("Certifying for this feed already in progress")]
     CertifyingInProgress,
+    #[msg("Finalizing for this feed already in progress")]
+    FinalizingInProgress,
     #[msg("Cannot stake on this round")]
     RoundNotStaking,
 }

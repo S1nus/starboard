@@ -110,7 +110,14 @@ pub struct StartCertifying<'info> {
 }
 
 #[derive(Accounts)]
-pub struct StartFinalizing {
+pub struct StartFinalizing<'info> {
+    #[account(mut)]
+    pub feed: AccountLoader<'info, Feed>,
+    #[account(
+        mut,
+        has_one = feed
+    )]
+    pub round: AccountLoader<'info, Round>,
 }
 
 #[derive(Accounts)]
