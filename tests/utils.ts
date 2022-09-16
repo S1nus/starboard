@@ -1,7 +1,10 @@
 import * as anchor from "@project-serum/anchor";
 import { Program } from "@project-serum/anchor";
 const webcrypto = require('crypto').webcrypto;
-
+import { 
+  TOKEN_PROGRAM_ID,
+  getOrCreateAssociatedTokenAccount,
+} from '@solana/spl-token';
 import {
   Keypair,
   PublicKey,
@@ -77,7 +80,7 @@ export async function startStaking(program: Program, feed: PublicKey, round: Pub
   const oldRound = feedData.stakingRound;
   const tx = await program
     .methods
-    .startStaking(roundNum)
+    .startStaking()
     .accounts({
       feed: feed,
       round: round,
@@ -91,48 +94,50 @@ export async function startStaking(program: Program, feed: PublicKey, round: Pub
 }
 
 export async function stake(program: Program, payer: Keypair, feed: PublicKey) {
+
+  const voterAta = await getOrCreateAssociatedTokenAccount(program.provider.connection, payer, new PublicKey("So11111111111111111111111111111111111111112"), payer.publicKey);
   const feedData = await program.account.feed.fetch(feed);
   const round = feedData.stakingRound;
   const roundData = await program.account.round.fetch(round);
-  console.log(roundData);
-  console.log(feedData);
-  const roundHeight = roundData.roundHeight;
-  console.log(roundBuf);
-  const roundNum = roundData.num;
   const [escrowKey] = await PublicKey.findProgramAddress(
     [
       Buffer.from("Escrow"),
       payer.publicKey.toBytes(),
-      feed.toBytes(),
-      roundHeight
+      round.toBytes(),
     ],
     program.programId
   );
-  console.log(escrowKey.toBase58());
-  console.log([
-      Buffer.from("Escrow"),
-      payer.publicKey.toBytes(),
-      feed.toBytes(),
-      roundBuf
-    ]);
-  console.log({
-    escrow: escrowKey.toBase58(),
-    voter: payer.publicKey.toBase58(),
-    feed: feed.toBase58(),
-    round: round.toBase58(),
-    systemProgram: SystemProgram.programId.toBase58(),
-    rent: SYSVAR_RENT_PUBKEY.toBase58(),
-  });
+
+  const [escrowToken] = await PublicKey.findProgramAddress(
+    [
+      Buffer.from("EscrowToken"),
+      escrowKey.toBytes()
+    ],
+    program.programId
+  );
+
+  const [programAsSigner] = await PublicKey.findProgramAddress(
+    [
+      Buffer.from("program"),
+      Buffer.from("signer"),
+    ],
+    program.programId
+  );
+
   const tx = await program
     .methods
-    .stake(roundNum, roundHeight)
+    .stake()
     .accounts({
       escrow: escrowKey,
+      escrowToken: escrowToken,
       voter: payer.publicKey,
+      voterTokenAccount: voterAta.address,
       feed: feed,
       round: round,
       systemProgram: SystemProgram.programId,
       rent: SYSVAR_RENT_PUBKEY,
+      nativeMint: new PublicKey("So11111111111111111111111111111111111111112"),
+      programAsSigner: programAsSigner,
     })
     .signers([payer])
     .rpc({skipPreflight: true});

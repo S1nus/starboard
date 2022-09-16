@@ -1,6 +1,20 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::msg;
 use std::ops::DerefMut;
+use solana_program::pubkey;
+use anchor_spl::{
+    mint, 
+    token::{
+        TokenAccount, 
+        Mint, 
+        Token,
+        Transfer,
+        transfer
+    },
+    associated_token::{
+        AssociatedToken
+    },
+};
 
 mod contexts;
 use contexts::*;
@@ -10,6 +24,10 @@ declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 const FEED_SEED: &[u8] = b"Feed";
 const ROUND_SEED: &[u8] = b"Round";
 const ESCROW_SEED: &[u8] = b"Escrow";
+const ESCROW_TOKEN_SEED: &[u8] = b"EscrowToken";
+const REPORT_RECORD_SEED: &[u8] = b"ReportRecordSeed";
+const CERT_RECORD_SEED: &[u8] = b"CertRecordSeed";
+const NATIVE_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 
 #[program]
 pub mod starboard {
@@ -28,12 +46,13 @@ pub mod starboard {
         feed.update_interval = update_interval;
         feed.staking_round = None;
         feed.reporting_round = None;
-        feed.committing_round = None;
+        feed.comitting_round = None;
         feed.certifying_round = None;
         feed.finalizing_round = None;
         feed.bump = *ctx.bumps.get("feed").unwrap();
         feed.started = false;
         feed.height = 0;
+        feed.min_stake = 5;
         Ok(())
     }
 
@@ -44,11 +63,12 @@ pub mod starboard {
         let round_key = ctx.accounts.round.key().clone();
         let mut round = ctx.accounts.round.load_init()?;
         //round.current_stage = StageKind::Standby;
+        round.feed = ctx.accounts.feed.key().clone();
         round.current_stage = 0;
         round.staking_start_timestamp = 0;
         round.num_stakers = 0;
         round.reporting_start_timestamp = 0;
-        round.committing_start_timestamp = 0;
+        round.comitting_start_timestamp = 0;
         round.certifying_start_timestamp = 0;
         round.finalizing_start_timestamp = 0;
         round.bump = *ctx.bumps.get("round").unwrap();
@@ -63,7 +83,7 @@ pub mod starboard {
                 feed.reporting_round = Some(round_key);
             },
             2 => {
-                feed.committing_round = Some(round_key);
+                feed.comitting_round = Some(round_key);
             },
             3 => {
                 feed.certifying_round = Some(round_key);
@@ -83,7 +103,7 @@ pub mod starboard {
         require!(
             feed.staking_round.is_some() ||
             feed.reporting_round.is_some() ||
-            feed.committing_round.is_some() ||
+            feed.comitting_round.is_some() ||
             feed.certifying_round.is_some() ||
             feed.finalizing_round.is_some(),
             StarboardError::NoRoundsError
@@ -94,7 +114,6 @@ pub mod starboard {
 
     pub fn start_staking(
         ctx: Context<StartStaking>,
-        num: u8
     ) -> Result<()> {
         let clock = Clock::get()?;
         let timestamp = clock.slot;
@@ -109,7 +128,7 @@ pub mod starboard {
         );
 
         if feed.staking_round != Some(round_key) {
-            if let Some(staking_round) = feed.staking_round {
+            if let Some(_staking_round) = feed.staking_round {
                 let old_round = AccountLoader::<Round>::try_from(&ctx.remaining_accounts[0])?;
                 let old_round_data = old_round.load()?;
                 let feed_not_staking = (old_round_data.staking_start_timestamp.checked_add(feed.update_interval.into()).unwrap()) < timestamp;
@@ -120,8 +139,11 @@ pub mod starboard {
         feed.staking_round = Some(round_key);
         round.current_stage = 1;
         round.staking_start_timestamp = timestamp;
-        feed.height = feed.height.checked_add(1).unwrap();
+        msg!("feed height: {}", feed.height);
+        feed.height = feed.height.checked_add(1u64).unwrap();
         round.round_height = feed.height;
+        msg!("feed height: {}", feed.height);
+        msg!("round height: {}", round.round_height);
         msg!("Staking round started at {}", timestamp);
 
         Ok(())
@@ -129,8 +151,6 @@ pub mod starboard {
 
     pub fn stake(
         ctx: Context<Stake>,
-        num: u8,
-        round_height: u64,
     ) -> Result<()> {
         let clock = Clock::get()?;
         let timestamp = clock.slot;
@@ -142,20 +162,126 @@ pub mod starboard {
         escrow.feed = ctx.accounts.feed.key();
         escrow.bump = *ctx.bumps.get("escrow").unwrap();
         escrow.timestamp = timestamp;
-        let mut feed = ctx.accounts.feed.load_mut()?;
+        let feed = ctx.accounts.feed.load_mut()?;
         let round_is_staking = 
             feed.staking_round == Some(round_key) &&
             round.current_stage == 1 &&
             round.staking_start_timestamp.checked_add(feed.update_interval.into()).unwrap() > timestamp;
         require!(round_is_staking, StarboardError::RoundNotStaking);
-        let mut voter_lamports = ctx.accounts.voter.try_borrow_mut_lamports()?;
-        let escrow_info = &ctx.accounts.escrow.to_account_infos()[0];
-        let mut escrow_lamports = escrow_info.try_borrow_mut_lamports()?;
-        **voter_lamports = voter_lamports.checked_sub(feed.min_stake).unwrap();
-        **escrow_lamports = voter_lamports.checked_add(feed.min_stake).unwrap();
         round.num_stakers = round.num_stakers.checked_add(1).unwrap();
+        let transfer_accounts = Transfer {
+            from: ctx.accounts.voter_token_account.to_account_info(),
+            to: ctx.accounts.escrow_token.to_account_info(),
+            authority: ctx.accounts.voter.to_account_info(),
+        };
+        let cpi_context = CpiContext::new(ctx.accounts.token_program.to_account_info(), transfer_accounts);
+        transfer(cpi_context, feed.min_stake)?;
         Ok(())
     }
+
+    pub fn start_reporting(ctx: Context<StartReporting>) -> Result<()> {
+        let clock = Clock::get()?;
+        let timestamp = clock.slot;
+        let round_key = ctx.accounts.round.key().clone();
+        let mut feed = ctx.accounts.feed.load_mut()?;
+        let mut round = ctx.accounts.round.load_mut()?;
+
+        // 1 = staking
+        require!(
+            round.current_stage == 1,
+            StarboardError::RoundNotReady
+        );
+        if feed.reporting_round != Some(round_key) {
+            if let Some(_reporting_round) = feed.reporting_round {
+                let old_round = AccountLoader::<Round>::try_from(&ctx.remaining_accounts[0])?;
+                let old_round_data = old_round.load()?;
+                let feed_not_reporting = (old_round_data.reporting_start_timestamp.checked_add(feed.update_interval.into()).unwrap()) < timestamp;
+                require!(feed_not_reporting, StarboardError::ReportingInProgress);
+            }
+        };
+
+        feed.reporting_round = Some(round_key);
+        round.current_stage = 2;
+        round.reporting_start_timestamp = timestamp;
+        Ok(())
+
+    }
+
+    pub fn report(
+        ctx: Context<Report>,
+        val: u64,
+        confidence_interval: u8
+    ) -> Result<()> {
+        /// TODO
+        Ok(())
+    }
+
+    pub fn start_comitting(ctx: Context<StartComitting>) -> Result<()> {
+        let clock = Clock::get()?;
+        let timestamp = clock.slot;
+        let round_key = ctx.accounts.round.key().clone();
+        let mut feed = ctx.accounts.feed.load_mut()?;
+        let mut round = ctx.accounts.round.load_mut()?;
+
+        // 2 = reporting
+        require!(
+            round.current_stage == 2,
+            StarboardError::RoundNotReady
+        );
+        if feed.comitting_round != Some(round_key) {
+            if let Some(_comitting_round) = feed.comitting_round {
+                let old_round = AccountLoader::<Round>::try_from(&ctx.remaining_accounts[0])?;
+                let old_round_data = old_round.load()?;
+                let feed_not_comitting = (old_round_data.comitting_start_timestamp.checked_add(feed.update_interval.into()).unwrap()) < timestamp;
+                require!(feed_not_comitting, StarboardError::ComittingInProgress);
+            }
+        };
+
+        feed.comitting_round = Some(round_key);
+        round.current_stage = 3;
+        round.comitting_start_timestamp = timestamp;
+        Ok(())
+
+    }
+
+    pub fn comitt(
+        ctx: Context<Comitt>,
+        commitment: [u8; 32],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn start_certifying(ctx: Context<StartCertifying>) -> Result<()> {
+        let clock = Clock::get()?;
+        let timestamp = clock.slot;
+        let round_key = ctx.accounts.round.key().clone();
+        let mut feed = ctx.accounts.feed.load_mut()?;
+        let mut round = ctx.accounts.round.load_mut()?;
+
+        // 3 = comitting
+        require!(
+            round.current_stage == 3,
+            StarboardError::RoundNotReady
+        );
+        if feed.certifying_round != Some(round_key) {
+            if let Some(_certifying_round) = feed.certifying_round {
+                let old_round = AccountLoader::<Round>::try_from(&ctx.remaining_accounts[0])?;
+                let old_round_data = old_round.load()?;
+                let feed_not_certifying = (old_round_data.certifying_start_timestamp.checked_add(feed.update_interval.into()).unwrap()) < timestamp;
+                require!(feed_not_certifying, StarboardError::CertifyingInProgress);
+            }
+        };
+
+        feed.comitting_round = Some(round_key);
+        round.current_stage = 3;
+        round.comitting_start_timestamp = timestamp;
+        Ok(())
+    }
+
+    pub fn certify(ctx: Context<Certify>) -> Result<()> {
+        Ok(())
+    }
+
 }
 
 #[derive(Copy, Clone)]
@@ -174,12 +300,13 @@ pub struct Starboard {}
 
 #[account(zero_copy)]
 pub struct Round {
+    pub feed: Pubkey,
     pub current_stage: u8,
 
     pub staking_start_timestamp: u64,
     pub num_stakers: u32,
     pub reporting_start_timestamp: u64,
-    pub committing_start_timestamp: u64,
+    pub comitting_start_timestamp: u64,
     pub certifying_start_timestamp: u64,
     pub finalizing_start_timestamp: u64,
     pub bump: u8,
@@ -203,7 +330,7 @@ pub struct Feed {
     // Pubkeys of the Round PDAs for each of the five pipelined-stages
     pub staking_round: Option<Pubkey>,
     pub reporting_round: Option<Pubkey>,
-    pub committing_round: Option<Pubkey>,
+    pub comitting_round: Option<Pubkey>,
     pub certifying_round: Option<Pubkey>,
     pub finalizing_round: Option<Pubkey>,
     pub bump: u8,
@@ -216,10 +343,43 @@ pub struct Feed {
 #[account(zero_copy)]
 pub struct Escrow {
     pub round_height: u64,
+    pub token_account: Pubkey,
     pub staker: Pubkey,
     pub feed: Pubkey,
     pub bump: u8,
     pub timestamp: u64,
+}
+
+#[account(zero_copy)]
+pub struct ReportRecord {
+    pub timestamp: u64,
+    pub round_height: u64,
+    pub round: Pubkey,
+    pub feed: Pubkey,
+    pub reporter: Pubkey,
+    pub escrow: Pubkey,
+    // note: fix the types here
+    /* confidence interval could be a percentage
+     * or we could do it the Pyth way.
+     */
+    pub value: u64,
+    pub confidence_interval: u8,
+}
+
+#[account(zero_copy)]
+pub struct CertRecord {
+    pub timestamp: u64,
+    pub round_height: u64,
+    pub round: Pubkey,
+    pub feed: Pubkey,
+    pub reporter: Pubkey,
+    pub escrow: Pubkey,
+    // note: fix the types here
+    /* confidence interval could be a percentage
+     * or we could do it the Pyth way.
+     */
+    pub value: u64,
+    pub confidence_interval: u8,
 }
 
 #[error_code]
@@ -230,6 +390,12 @@ pub enum StarboardError {
     RoundNotReady,
     #[msg("Staking for this feed already in progress")]
     StakingInProgress,
+    #[msg("Reporting for this feed already in progress")]
+    ReportingInProgress,
+    #[msg("Comitting for this feed already in progress")]
+    ComittingInProgress,
+    #[msg("Certifying for this feed already in progress")]
+    CertifyingInProgress,
     #[msg("Cannot stake on this round")]
     RoundNotStaking,
 }

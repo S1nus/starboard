@@ -17,6 +17,10 @@ import {
   startStaking,
   stake,
 } from './utils';
+import { 
+  TOKEN_PROGRAM_ID,
+  getOrCreateAssociatedTokenAccount,
+} from '@solana/spl-token';
 
 describe("starboard", () => {
   // Configure the client to use the local cluster.
@@ -35,7 +39,7 @@ describe("starboard", () => {
       rounds[i] = key;
       console.log(`round ${i}: ${key}`);
     }
-    await startFeed(program, feed);
+
     await startStaking(program, feed, rounds[0]);
     await stake(program, payer, feed);
 
